@@ -1,0 +1,156 @@
+name: Incident Switchboard
+
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('{0}{1}', inputs.severity == 'low' && 'LOW' || inputs.severity == 'medium' && 'MEDIUM' || 'HIGH', inputs.deep_scan == true && ' SCAN' || '') || format('AUTOMATIC {0}', github.event_name) }}
+
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+  workflow_dispatch:
+    inputs:
+      severity:
+        description: Incident severity
+        type: choice
+        options:
+          - low
+          - medium
+          - high
+        default: low
+        required: true
+
+      deep_scan:
+        description: Run deep scan
+        type: boolean
+        default: false
+        required: true
+
+      skip_tests:
+        description: Skip tests
+        type: boolean
+        default: false
+        required: true
+
+      reason:
+        description: Reason for incident run
+        type: string
+        required: false
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Run information
+        run: |
+          echo "Event: ${{ github.event_name }}"
+          echo "Ref: ${{ github.ref }}"
+          echo "Actor: ${{ github.actor }}"
+          echo "Run number: ${{ github.run_number }}"
+
+      - name: Manual run details
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          echo "Severity: ${{ inputs.severity }}"
+          echo "Deep scan: ${{ inputs.deep_scan }}"
+          echo "Skip tests: ${{ inputs.skip_tests }}"
+          echo "Reason: ${{ inputs.reason }}"
+
+      - name: Automatic run details
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        run: echo "This run was automatic and no reason was supplied."
+
+      - name: Low severity
+        if: ${{ inputs.severity == 'low' }}
+        run: echo "Low severity incident."
+
+      - name: Medium severity
+        if: ${{ inputs.severity == 'medium' }}
+        run: echo "Medium severity incident."
+
+      - name: High severity
+        if: ${{ inputs.severity == 'high' }}
+        run: echo "High severity incident."
+
+
+  tests:
+    needs: triage
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.skip_tests != true }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        working-directory: react-app
+        run: npm install
+
+      - name: Run tests
+        working-directory: react-app
+        run: npm test
+
+
+  scan:
+    needs: triage
+    if: ${{ inputs.deep_scan == true || inputs.severity == 'high' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Create scan file
+        run: |
+          cat > scan.json <<EOF
+          {
+            "severity": "${{ inputs.severity }}",
+            "deep_scan": "${{ inputs.deep_scan }}",
+            "actor": "${{ github.actor }}",
+            "run_number": "${{ github.run_number }}",
+            "time_utc": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          }
+          EOF
+
+      - name: Read values with jq
+        run: |
+          echo "Severity: $(jq -r '.severity' scan.json)"
+          echo "Actor: $(jq -r '.actor' scan.json)"
+
+
+  report:
+    needs:
+      - tests
+      - scan
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Report test status
+        run: 'echo "Tests job: ${{ needs.tests.result }}"'
+
+      - name: Report scan status
+        run: 'echo "Scan job: ${{ needs.scan.result }}"'
+
+      - name: Summary
+        run: |
+          if [[ "${{ needs.tests.result }}" == "success" || "${{ needs.tests.result }}" == "skipped" ]] && \
+             [[ "${{ needs.scan.result }}" == "success" || "${{ needs.scan.result }}" == "skipped" ]]; then
+            echo "Everything that ran was successful."
+          else
+            echo "One or more jobs failed."
+          fi
+
+      - name: Close switchboard
+        run: echo "Switchboard closed"
